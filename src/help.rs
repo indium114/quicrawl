@@ -1,5 +1,15 @@
 use scraper::{Html, Selector};
 use serde::{Serialize, Deserialize};
+use std::sync::{Arc, LazyLock};
+use tokio::sync::Semaphore;
+
+static SEM: LazyLock<Arc<Semaphore>> = LazyLock::new(|| Arc::new(Semaphore::new(20)));
+static CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+    reqwest::Client::builder()
+        .user_agent("quicrawl (https://github.com/indium114/quicrawl)")
+        .build()
+        .unwrap()
+});
 
 // MARK: types
 #[derive(Debug, Deserialize, Serialize)]
@@ -11,11 +21,7 @@ pub struct Site {
 
 // MARK: helper functions
 pub async fn get(url: &str) -> std::result::Result<String, reqwest::Error> {
-    let client = reqwest::Client::builder()
-        .user_agent("quicrawl (https://github.com/indium114/quicrawl)")
-        .build()?;
-
-    let response = client.get(url).send().await?;
+    let response = CLIENT.get(url).send().await?;
 
     response.text().await
 }
@@ -71,13 +77,18 @@ pub async fn crawl_url(url: String) {
     let id = tokio::task::id();
     println!("[log] task {id} crawling {url}");
 
+    let permit = SEM.acquire().await.unwrap();
+
     let response = match get(&url).await {
         Ok(response) => response,
         Err(e) => {
-            println!("[err] while crawling {url}: {e}");
+            println!("[err] while crawling {url}: {:#?}", e);
             return;
         }
     };
+
+    drop(permit);
+
     let links = parse_links(&response, &url);
     let text = parse_text(&response);
     let title = parse_title(&response);
