@@ -75,14 +75,14 @@ pub fn spawn_crawl(url: String) {
 
 pub async fn crawl_url(url: String) {
     let id = tokio::task::id();
-    println!("[log] task {id} crawling {url}");
+    usefulog::log(format!("task {id} crawling {url}"));
 
     let permit = SEM.acquire().await.unwrap();
 
     let response = match get(&url).await {
         Ok(response) => response,
         Err(e) => {
-            println!("[err] while crawling {url}: {:#?}", e);
+            usefulog::err(format!("while crawling {url}: {:#?}", e));
             return;
         }
     };
