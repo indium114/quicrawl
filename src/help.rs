@@ -1,10 +1,12 @@
 use scraper::{Html, Selector};
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock, Mutex};
+use std::fs;
 use tokio::sync::Semaphore;
 
-static SEM: LazyLock<Arc<Semaphore>> = LazyLock::new(|| Arc::new(Semaphore::new(20)));
+static REQUEST_SEM: LazyLock<Arc<Semaphore>> = LazyLock::new(|| Arc::new(Semaphore::new(20)));
+static WRITE_SEM: LazyLock<Arc<Semaphore>> = LazyLock::new(|| Arc::new(Semaphore::new(1)));
 static CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
     reqwest::Client::builder()
         .user_agent("quicrawl (https://github.com/indium114/quicrawl)")
@@ -12,14 +14,12 @@ static CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
         .unwrap()
 });
 
-static ROBOTS_CACHE: LazyLock<Mutex<HashMap<String, Arc<RobotsTxt>>>> = LazyLock::new(|| {
-    Mutex::new(HashMap::new())
-});
+static ROBOTS_CACHE: LazyLock<Mutex<HashMap<String, Arc<RobotsTxt>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
-static VISITED: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(|| {
-    Mutex::new(HashSet::new())
-});
+static VISITED: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
 
+// MARK: robots.txt stuff
 struct RobotsTxt {
     disallows: Vec<String>,
     allows: Vec<String>,
@@ -27,7 +27,10 @@ struct RobotsTxt {
 
 impl RobotsTxt {
     fn allow_all() -> Self {
-        RobotsTxt { disallows: Vec::new(), allows: Vec::new() }
+        RobotsTxt {
+            disallows: Vec::new(),
+            allows: Vec::new(),
+        }
     }
 
     fn parse(body: &str) -> Self {
@@ -74,7 +77,9 @@ impl RobotsTxt {
         }
         for a in &self.allows {
             if path.starts_with(a) {
-                let better = matched.map_or(true, |(len, allowed)| a.len() > len || (a.len() == len && !allowed));
+                let better = matched.map_or(true, |(len, allowed)| {
+                    a.len() > len || (a.len() == len && !allowed)
+                });
                 if better {
                     matched = Some((a.len(), true));
                 }
@@ -86,12 +91,15 @@ impl RobotsTxt {
 }
 
 fn extract_domain(url: &str) -> Option<&str> {
-    let domain = url.strip_prefix("http://").or_else(|| url.strip_prefix("https://"))?;
+    let domain = url
+        .strip_prefix("http://")
+        .or_else(|| url.strip_prefix("https://"))?;
     domain.split('/').next()
 }
 
 fn extract_path(url: &str) -> &str {
-    let after_scheme = url.strip_prefix("http://")
+    let after_scheme = url
+        .strip_prefix("http://")
         .or_else(|| url.strip_prefix("https://"))
         .unwrap_or(url);
     after_scheme.find('/').map_or("/", |i| &after_scheme[i..])
@@ -128,6 +136,21 @@ pub struct Site {
     pub text: String,
 }
 
+// MARK: save/load helpers
+pub fn load_index() -> Vec<Site> {
+    fs::read_to_string("index.json")
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+pub fn save_index(index: Vec<Site>) -> bool {
+    match serde_json::to_string_pretty(&index) {
+        Ok(json) => fs::write("index.json", json).is_ok(),
+        Err(_) => false,
+    }
+}
+
 // MARK: helper functions
 pub async fn get(url: &str) -> std::result::Result<String, reqwest::Error> {
     let response = CLIENT.get(url).send().await?;
@@ -160,10 +183,14 @@ pub fn parse_text(html: &str) -> String {
 
     if let Some(body) = document.select(&selector).next() {
         let full_text = body.text().collect::<Vec<_>>().join(" ");
-        return full_text.split_whitespace().take(100).collect::<Vec<_>>().join(" ");
+        return full_text
+            .split_whitespace()
+            .take(100)
+            .collect::<Vec<_>>()
+            .join(" ");
     }
 
-    return "".to_string()
+    return "".to_string();
 }
 
 pub fn parse_title(html: &str) -> String {
@@ -174,12 +201,12 @@ pub fn parse_title(html: &str) -> String {
         return title.text().collect::<Vec<_>>().join("");
     }
 
-    return "Unknown Title".to_string()
+    return "Unknown Title".to_string();
 }
 
 pub fn spawn_crawl(url: String) {
     tokio::spawn(async move {
-       crawl_url(url).await;
+        crawl_url(url).await;
     });
 }
 
@@ -197,7 +224,11 @@ pub async fn crawl_url(url: String) {
     usefulog::log(format!("task {id} crawling {url}"));
 
     if let Some(domain) = extract_domain(&url) {
-        let scheme = if url.starts_with("https://") { "https" } else { "http" };
+        let scheme = if url.starts_with("https://") {
+            "https"
+        } else {
+            "http"
+        };
         let robots = ensure_robots(domain, scheme).await;
         if !robots.is_allowed(extract_path(&url)) {
             usefulog::log(format!("task {id} skipped {url} (blocked by robots.txt)"));
@@ -205,7 +236,7 @@ pub async fn crawl_url(url: String) {
         }
     }
 
-    let permit = SEM.acquire().await.unwrap();
+    let request_permit = REQUEST_SEM.acquire().await.unwrap();
 
     let response = match get(&url).await {
         Ok(response) => response,
@@ -215,7 +246,7 @@ pub async fn crawl_url(url: String) {
         }
     };
 
-    drop(permit);
+    drop(request_permit);
 
     let links = parse_links(&response, &url);
     let text = parse_text(&response);
@@ -240,4 +271,12 @@ pub async fn crawl_url(url: String) {
     for link in links {
         spawn_crawl(link);
     }
+
+    let write_permit = WRITE_SEM.acquire().await.unwrap();
+
+    let mut index = load_index();
+    index.push(index_entry);
+    let _ = save_index(index);
+
+    drop(write_permit);
 }
