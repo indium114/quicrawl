@@ -129,7 +129,7 @@ async fn ensure_robots(domain: &str, scheme: &str) -> Arc<RobotsTxt> {
 }
 
 // MARK: types
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, PartialEq)]
 pub struct Site {
     pub title: String,
     pub url: String,
@@ -275,8 +275,12 @@ pub async fn crawl_url(url: String) {
     let write_permit = WRITE_SEM.acquire().await.unwrap();
 
     let mut index = load_index();
-    index.push(index_entry);
-    let _ = save_index(index);
+    if !index.contains(&index_entry) {
+        index.push(index_entry);
+        let _ = save_index(index);
+    }
+
+    usefulog::hint(format!("wrote index entry to disk"));
 
     drop(write_permit);
 }
