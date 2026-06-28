@@ -159,6 +159,12 @@ pub struct Site {
     pub title: String,
     pub url: String,
     pub text: String,
+    pub description: Option<String>,
+    pub keywords: Option<String>,
+    pub author: Option<String>,
+    pub language: Option<String>,
+    pub canonical_url: Option<String>,
+    pub favicon: Option<String>,
 }
 
 // MARK: save/load helpers
@@ -183,9 +189,8 @@ pub async fn get(url: &str) -> std::result::Result<String, reqwest::Error> {
     response.text().await
 }
 
-pub fn parse_links(html: &str, original_link: &str) -> Vec<String> {
+pub fn parse_links(document: &Html, original_link: &str) -> Vec<String> {
     let mut links: Vec<String> = Vec::new();
-    let document = Html::parse_document(html);
     let selector = Selector::parse("a[href]").unwrap();
 
     for element in document.select(&selector) {
@@ -202,8 +207,7 @@ pub fn parse_links(html: &str, original_link: &str) -> Vec<String> {
     links
 }
 
-pub fn parse_text(html: &str) -> String {
-    let document = Html::parse_document(html);
+pub fn parse_text(document: &Html) -> String {
     let selector = Selector::parse("body").unwrap();
 
     if let Some(body) = document.select(&selector).next() {
@@ -218,8 +222,7 @@ pub fn parse_text(html: &str) -> String {
     return "".to_string();
 }
 
-pub fn parse_title(html: &str) -> String {
-    let document = Html::parse_document(html);
+pub fn parse_title(document: &Html) -> String {
     let selector = Selector::parse("title").unwrap();
 
     if let Some(title) = document.select(&selector).next() {
@@ -227,6 +230,12 @@ pub fn parse_title(html: &str) -> String {
     }
 
     return "Unknown Title".to_string();
+}
+
+fn attr(doc: &Html, sel: &str, attr: &str) -> Option<String> {
+    Selector::parse(sel).ok().and_then(|s| {
+        doc.select(&s).next().and_then(|el| el.value().attr(attr)).map(|s| s.to_string())
+    })
 }
 
 pub fn spawn_crawl(url: String) {
@@ -273,14 +282,27 @@ pub async fn crawl_url(url: String) {
 
     drop(request_permit);
 
-    let links = parse_links(&response, &url);
-    let text = parse_text(&response);
-    let title = parse_title(&response);
+    let doc = Html::parse_document(&response);
+    let links = parse_links(&doc, &url);
+    let text = parse_text(&doc);
+    let title = parse_title(&doc);
+    let description = attr(&doc, "meta[name=\"description\"], meta[property=\"description\"]", "content");
+    let keywords = attr(&doc, "meta[name=\"keywords\"]", "content");
+    let author = attr(&doc, "meta[name=\"author\"]", "content");
+    let language = attr(&doc, "html", "lang");
+    let canonical_url = attr(&doc, "link[rel=\"canonical\"]", "href");
+    let favicon = attr(&doc, "link[rel=\"icon\"], link[rel=\"shortcut icon\"]", "href");
 
     let index_entry = Site {
-        title: title,
-        url: url,
-        text: text,
+        title,
+        url,
+        text,
+        description,
+        keywords,
+        author,
+        language,
+        canonical_url,
+        favicon,
     };
 
     #[cfg(debug_assertions)]
