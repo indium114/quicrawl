@@ -27,3 +27,5 @@ https://en.wikipedia.org
 https://stackexchange.com
 https://reddit.com
 https://darky-github.github.io/seed_urls_for_crawlers
+https://minecraft.net
+https://frame.work
